@@ -1,0 +1,47 @@
+==============================================================
+  ELITA ROBOT - CARA INSTALL & MENJALANKAN
+==============================================================
+
+1. VERSI PYTHON
+   Gunakan Python 3.10, 3.11, atau 3.12 (disarankan 3.11).
+   Cek versi di Command Prompt / PowerShell:
+       python --version
+
+   Belum punya Python? Download di https://www.python.org/downloads/
+   Saat install, CENTANG "Add Python to PATH".
+
+2. INSTALL LIBRARY (cukup sekali)
+   Buka PowerShell di folder project ini, lalu jalankan:
+       pip install -r python/requirements.txt
+
+   Jika muncul error "module 'websocket' has no attribute WebSocketApp":
+       pip uninstall websocket -y
+       pip install websocket-client
+
+3. HUBUNGKAN LAPTOP KE ROBOT
+   - Nyalakan robot.
+   - Sambungkan WiFi laptop ke:  ElitaRobot   (password: elita1234)
+   - Jika Windows bilang "No internet", tetap pilih terhubung.
+
+4. JALANKAN PROGRAM
+       cd python
+       python main.py
+
+   Jendela dashboard akan terbuka.
+   - Isi W (lebar area) dan H (panjang lajur) dalam meter.
+   - START  : robot mulai jalan (jika robot tidak terhubung -> mode simulasi)
+   - STOP   : robot berhenti total
+   - RESET  : kembali ke posisi awal
+   - LOG    : saklar ON/OFF. Nyalakan (LOG: ON) SEBELUM menekan START.
+              Data perjalanan (CSV + gambar) otomatis tersimpan di folder ini
+              saat perjalanan selesai atau saat STOP ditekan.
+
+5. POSISI AWAL ROBOT
+   Letakkan robot di POJOK KIRI BAWAH area, menghadap ke atas
+   (sejajar sisi H). Sisakan ruang +-1 meter di atas dan di bawah area
+   untuk robot berputar.
+
+6. DASHBOARD HP (opsional)
+   Sambungkan HP ke WiFi ElitaRobot, buka browser:
+       http://192.168.4.1
+==============================================================

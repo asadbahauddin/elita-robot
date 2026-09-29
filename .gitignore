@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+elita_log_*.csv
+elita_log_*.png
+.vscode/
+.idea/
+
+# file pengembangan (tidak untuk client)
+logs/
+sim_log.csv
+sim_*.png
+sim_path_planning.py
+index.html
+pathplanning.html
