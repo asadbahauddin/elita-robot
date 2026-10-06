@@ -310,9 +310,6 @@ class Driver:
                 self.link.send({"cmd": "ping"})
 
 
-# ══════════════════════════════════════════════════════════════
-# STATE ROBOT (pose odometri + encoder simulasi)
-# ══════════════════════════════════════════════════════════════
 
 class RobotState:
     def __init__(self):
@@ -359,9 +356,11 @@ class RobotState:
             self.yaw += omega * dt
 
             # 2. kecepatan roda (differential drive):
-            #    V = (VR + VL) / 2, omega = (VR - VL) / TRACK
-            v_r = v + omega * ENC_TRACK / 2.0
-            v_l = v - omega * ENC_TRACK / 2.0
+            #    omega > 0 = belok KANAN (yaw searah jarum jam),
+            #    roda luar (kiri) lebih cepat:
+            #    V = (VR + VL) / 2, omega = (VL - VR) / TRACK
+            v_r = v - omega * ENC_TRACK / 2.0
+            v_l = v + omega * ENC_TRACK / 2.0
 
             # 3. jarak roda
             ds_r = v_r * dt
@@ -1010,7 +1009,7 @@ class ElitaGUI:
             f"(skala X {self.info.get('x_scale', 1.0):.3f})",
             f"[TARGET AKHIR]  x={ex:.2f} y={ey:.2f} m yaw={math.degrees(eyaw) % 360:.0f} deg",
             "-" * 48,
-            "[ENCODER SIMULASI]",
+            "[ENCODER]",
             f"  L = {enc['enc_l']:>8d} count",
             f"  R = {enc['enc_r']:>8d} count",
             "[WHEEL DIST]",
