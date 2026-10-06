@@ -1,34 +1,24 @@
 """
-ELITA Robot — Python Controller (Laptop) v5
-===========================================
-Tema    : gelap (latar hitam), tombol START / STOP / RESET / LOG, input W & H
+ELITA Robot — Python Controller (Laptop) v5.1
+=============================================
+Tema    : gelap, tombol START / STOP / RESET / LOG, input W & H
 Koneksi : WebSocket ke ESP32 ws://192.168.4.1:81  (Uno v4.1 + ESP32 v4.3)
 Metode  : Coverage path boustrophedon, kontrol gerak open-loop terkalibrasi
 
-KALIBRASI (lantai datar, baterai penuh, 30-09-2026):
-  Maju 156 cm  : 4,77 / 4,81 / 4,84 s  -> V_FWD = 0,3245 m/s
-  U-turn kanan : 7,80 s                -> diameter 195 cm (diukur)
-  U-turn kiri  : 8,45 s (1x)           -> diameter 195 cm (diukur)
-  => Radius belok R = 0,975 m, jarak lajur minimum = 2R = 1,95 m.
-  Setiap gerak dimulai dari DIAM dengan perintah yang sama seperti tombol
-  dashboard saat kalibrasi (servo + motor dikirim bersamaan), lalu STOP.
-
 POLA:
   Start pojok kiri bawah (0,0), menghadap +Y (ke atas, sejajar sisi H).
-  Lajur ke-i di x = i*RS, panjang H. Belokan dilakukan DI LUAR area
-  (butuh ruang ~R = 1 m di atas & di bawah area).
-    RS == 2R : U-turn full-lock (kanan di atas, kiri di bawah)
-    RS >  2R : belok 90 -> maju (RS - 2R) -> belok 90   ("belokan Pi")
-    RS <  2R : ditolak (robot tidak bisa belok setajam itu)
+  Lajur ke-i di x = i*RS, panjang H. Belokan dilakukan DI LUAR area.
   Cutter ON hanya di lajur lurus, OFF saat belok.
 
 CATATAN:
-  Jejak di layar adalah odometri dead-reckoning dari parameter kalibrasi
-  (V_FWD, T_UTURN, R_TURN). Verifikasi ketepatan: tandai posisi akhir robot
-  di lantai lalu bandingkan dengan titik target di peta.
+  - Pose (x, y, yaw) = odometri dead-reckoning dari parameter kalibrasi.
+  - Sumbu X di tampilan/CSV diskalakan agar lajur terakhir tepat di x = W;
+    posisi fisik tetap tersimpan (kolom x_fisik_m).
+  - Encoder (count, jarak roda, RPM) = ENCODER SIMULASI, dihitung dari
+    pose odometri, bukan dibaca dari sensor.
 
 Instalasi:
-  pip install websocket-client matplotlib numpy
+  pip install -r requirements.txt
 """
 
 import threading
@@ -51,57 +41,78 @@ from matplotlib.animation import FuncAnimation
 
 from websocket import WebSocketApp
 
-# ──────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════
 # KONFIGURASI & KALIBRASI
-# ──────────────────────────────────────────────────────────────
-DEFAULT_IP     = "192.168.4.1"
-WS_PORT        = 81
+# ══════════════════════════════════════════════════════════════
 
-SERVO_CENTER   = 75
-SERVO_LEFT     = 45
-SERVO_RIGHT    = 110
+DEFAULT_IP = "192.168.4.1"
+WS_PORT = 81
 
-V_FWD          = 1.56 / ((4.77 + 4.81 + 4.84) / 3.0)   # m/s, maju lurus
-T_UTURN = {+1: 7.80,          # detik, U-turn 180 derajat KANAN (servo 110) - kalibrasi ulang
-           -1: 8.45}          # detik, U-turn 180 derajat KIRI  (servo 45)
-R_TURN         = 1.95 / 2.0   # m, radius belok hasil ukur (kiri = kanan)
-MOTOR_ON       = 255          # Uno v4: motor ON/OFF saja
+# Servo
+SERVO_CENTER = 75
+SERVO_LEFT = 45
+SERVO_RIGHT = 110
 
-PAUSE_S        = 0.4          # diam di antara gerak (robot benar-benar berhenti)
-HEARTBEAT_S    = 0.2
-TEL_STALE_S    = 1.5
-SIM_SPEEDUP    = 3.0
+# Kecepatan maju: 1.56 m / rata-rata waktu kalibrasi
+V_FWD = 1.56 / ((4.77 + 4.81 + 4.84) / 3.0)
+
+# Waktu U-turn 180 deg
+T_UTURN = {+1: 7.80,    # kanan
+           -1: 8.45}    # kiri
+
+# Radius belok
+R_TURN = 1.95 / 2.0
+
+MOTOR_ON = 255
+
+# Timing
+PAUSE_S = 0.4
+HEARTBEAT_S = 0.2
+TEL_STALE_S = 1.5
+SIM_SPEEDUP = 3.0
 
 # Dimensi robot (m)
-WHEELBASE      = 0.25
-TRACK          = 0.18
-WHEEL_D        = 0.06
-WHEEL_W        = 0.03
-BODY_LEN       = 0.34
-BODY_W         = 0.21
-REAR_OVERHANG  = 0.045
-STEER_DRAW_DEG = math.degrees(math.atan(WHEELBASE / R_TURN))   # sudut efektif ~14 derajat
+WHEELBASE = 0.25
+TRACK = 0.18
+WHEEL_D = 0.06
+WHEEL_W = 0.03
+BODY_LEN = 0.34
+BODY_W = 0.21
+REAR_OVERHANG = 0.045
+STEER_DRAW_DEG = math.degrees(math.atan(WHEELBASE / R_TURN))
 
-BG_BTN         = "#1f2430"
-BG_HOVER       = "#2d3446"
-GRID_C         = "#2a2f3a"
-COL_CUT        = "#ff4040"   # lurus / cutter ON  (merah)
-COL_TURN       = "#3b82f6"   # belok / U-turn     (biru)
+# Encoder
+# GANTI ENCODER_PPR sesuai encoder fisik (mis. 11, 20, 600).
+# Diasumsikan quadrature x4: CPR = PPR x 4.
+ENCODER_PPR = 600
+ENCODER_QUAD = 4
+ENCODER_CPR = ENCODER_PPR * ENCODER_QUAD
+WHEEL_CIRC = math.pi * WHEEL_D                 # keliling roda
+ENC_M_PER_COUNT = WHEEL_CIRC / ENCODER_CPR     # meter per 1 count
+ENC_TRACK = TRACK                              # jarak roda kiri-kanan
 
-AREA_W_DEF     = 4.0
-AREA_H_DEF     = 3.0
-ROW_SP_DEF     = 1.95
+# Warna & GUI
+BG_BTN = "#1f2430"
+BG_HOVER = "#2d3446"
+GRID_C = "#2a2f3a"
+COL_CUT = "#ff4040"    # lurus / cutter ON
+COL_TURN = "#3b82f6"   # belok
 
-CHART_LEN      = 150
+AREA_W_DEF = 4.0
+AREA_H_DEF = 3.0
+ROW_SP_DEF = 1.95
+CHART_LEN = 150
 
 
 def ws_url(ip):
     return f"ws://{ip}:{WS_PORT}"
 
 
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 # TERMINAL STATUS
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+
 _status_lock = threading.Lock()
 STATUS_LINES = deque(maxlen=18)
 
@@ -118,9 +129,10 @@ def status_snapshot(n=12):
         return list(STATUS_LINES)[-n:]
 
 
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 # LINK WEBSOCKET
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+
 TEL_KEYS = ("mk", "mr", "ms", "sv", "ct", "wd", "bf", "el", "er", "up")
 
 
@@ -245,12 +257,13 @@ class RobotLink:
             app.close()
 
 
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 # DRIVER + HEARTBEAT
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+
 class Driver:
-    """Simpan state perintah, heartbeat ping tiap 0,2 s (watchdog Uno 1 s),
-    drive penuh tiap 1 s untuk koreksi bila ada perintah hilang."""
+    """Simpan state perintah. Heartbeat ping tiap 0.2 s (watchdog Uno = 1 s).
+    Full drive dikirim ulang tiap 1 s untuk koreksi jika perintah hilang."""
 
     def __init__(self, link):
         self.link = link
@@ -260,8 +273,10 @@ class Driver:
         threading.Thread(target=self._heartbeat, daemon=True, name="heartbeat").start()
 
     def drive(self, mk, mr, sv, ct):
-        st = {"mk": int(mk), "mr": int(mr), "ms": MOTOR_ON if (mk or mr) else 0,
-              "sv": int(max(SERVO_LEFT, min(SERVO_RIGHT, sv))), "ct": 1 if ct else 0}
+        st = {"mk": int(mk), "mr": int(mr),
+              "ms": MOTOR_ON if (mk or mr) else 0,
+              "sv": int(max(SERVO_LEFT, min(SERVO_RIGHT, sv))),
+              "ct": 1 if ct else 0}
         with self._lock:
             self._state = st
             self._active = bool(st["mk"] or st["mr"] or st["ct"])
@@ -295,71 +310,125 @@ class Driver:
                 self.link.send({"cmd": "ping"})
 
 
-# ──────────────────────────────────────────────────────────────
-# POSE (x, y [m], yaw [rad]: 0 = +Y, positif = searah jarum jam)
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# STATE ROBOT (pose odometri + encoder simulasi)
+# ══════════════════════════════════════════════════════════════
+
 class RobotState:
     def __init__(self):
         self._lock = threading.Lock()
-        self.x = self.y = self.yaw = 0.0
-        self.steer = 0            # -1 kiri, 0 lurus, +1 kanan (untuk gambar)
-        self.cut = 0
-        self.traj = deque(maxlen=30000)          # (x, y, cutter)
-        self.traj.append((0.0, 0.0, 0))
+        self.x_scale = 1.0          # skala tampilan sumbu X; self.x tetap fisik
+        self.traj = deque(maxlen=30000)
+        self.reset()
 
     def reset(self):
         with self._lock:
+            # pose
             self.x = self.y = self.yaw = 0.0
             self.steer = 0
             self.cut = 0
+            # encoder (count integer + akumulator float, karena jarak per
+            # timestep biasanya bukan bilangan bulat count)
+            self.enc_l = self.enc_r = 0
+            self.enc_l_f = self.enc_r_f = 0.0
+            # jarak roda & RPM
+            self.wheel_l_m = self.wheel_r_m = 0.0
+            self.rpm_l = self.rpm_r = 0.0
             self.traj.clear()
             self.traj.append((0.0, 0.0, 0))
 
+    def set_x_scale(self, s):
+        with self._lock:
+            self.x_scale = s
+
+    def x_fisik(self):
+        with self._lock:
+            return self.x
+
     def set_cmd(self, steer, cut):
         with self._lock:
-            self.steer, self.cut = steer, cut
+            self.steer = steer
+            self.cut = cut
 
     def integrate(self, v, omega, dt):
         with self._lock:
+            # 1. pose robot
             ym = self.yaw + omega * dt / 2.0
             self.x += v * dt * math.sin(ym)
             self.y += v * dt * math.cos(ym)
             self.yaw += omega * dt
+
+            # 2. kecepatan roda (differential drive):
+            #    V = (VR + VL) / 2, omega = (VR - VL) / TRACK
+            v_r = v + omega * ENC_TRACK / 2.0
+            v_l = v - omega * ENC_TRACK / 2.0
+
+            # 3. jarak roda
+            ds_r = v_r * dt
+            ds_l = v_l * dt
+            self.wheel_r_m += ds_r
+            self.wheel_l_m += ds_l
+
+            # 4. jarak -> count encoder
+            self.enc_r_f += ds_r / ENC_M_PER_COUNT
+            self.enc_l_f += ds_l / ENC_M_PER_COUNT
+            self.enc_r = int(round(self.enc_r_f))
+            self.enc_l = int(round(self.enc_l_f))
+
+            # 5. RPM
+            if dt > 0:
+                self.rpm_r = v_r / WHEEL_CIRC * 60.0
+                self.rpm_l = v_l / WHEEL_CIRC * 60.0
+
+            # 6. jejak
             lx, ly, lc = self.traj[-1]
             if math.hypot(self.x - lx, self.y - ly) >= 0.01 or lc != self.cut:
                 self.traj.append((self.x, self.y, self.cut))
 
     def snapshot(self):
+        """Pose & jejak; x dalam skala tampilan."""
         with self._lock:
-            return self.x, self.y, self.yaw, self.steer, self.cut, list(self.traj)
+            s = self.x_scale
+            return (self.x * s, self.y, self.yaw, self.steer, self.cut,
+                    [(tx * s, ty, tc) for tx, ty, tc in self.traj])
+
+    def encoder_snapshot(self):
+        with self._lock:
+            return {"enc_l": self.enc_l, "enc_r": self.enc_r,
+                    "wheel_l_m": self.wheel_l_m, "wheel_r_m": self.wheel_r_m,
+                    "rpm_l": self.rpm_l, "rpm_r": self.rpm_r,
+                    "distance_m": (abs(self.wheel_l_m) + abs(self.wheel_r_m)) / 2.0}
 
 
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 # PATH PLANNING
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+
 def plan_path(area_w, area_h, row_sp):
-    """Kembalikan (segmen, polyline_rencana, info) atau raise ValueError.
-    segmen: list dict {type: 'lane'|'turn'|'gap', ...}"""
+    """Kembalikan (segmen, polyline_rencana, info) atau raise ValueError."""
     D = 2.0 * R_TURN
     if row_sp < D - 1e-6:
         raise ValueError(f"RS {row_sp:.2f} m < diameter U-turn {D:.2f} m (robot tidak bisa)")
     n = int(area_w / row_sp + 1e-9) + 1
     gap = row_sp - D
+
+    # daftar segmen
     segs = []
     for i in range(n):
         segs.append({"type": "lane", "row": i, "len": area_h})
         if i < n - 1:
-            side = +1 if i % 2 == 0 else -1          # atas: kanan, bawah: kiri
+            side = +1 if i % 2 == 0 else -1          # atas = kanan, bawah = kiri
             if gap < 1e-3:
                 segs.append({"type": "turn", "side": side, "deg": 180.0, "row": i})
             else:
-                segs.append({"type": "turn", "side": side, "deg": 90.0, "row": i})
-                segs.append({"type": "gap", "len": gap, "row": i})
-                segs.append({"type": "turn", "side": side, "deg": 90.0, "row": i})
+                segs += [{"type": "turn", "side": side, "deg": 90.0, "row": i},
+                         {"type": "gap", "len": gap, "row": i},
+                         {"type": "turn", "side": side, "deg": 90.0, "row": i}]
 
     # polyline rencana (kinematik ideal)
-    pts, x, y, yaw = [(0.0, 0.0)], 0.0, 0.0, 0.0
-    polys = []                                  # (warna, np.array titik) per segmen
+    pts = [(0.0, 0.0)]
+    x = y = yaw = 0.0
+    polys = []
     for s in segs:
         start = len(pts) - 1
         if s["type"] in ("lane", "gap"):
@@ -378,26 +447,39 @@ def plan_path(area_w, area_h, row_sp):
                 pts.append((x, y))
         polys.append((COL_CUT if s["type"] == "lane" else COL_TURN, np.array(pts[start:])))
 
+    # skala tampilan sumbu X: lajur terakhir digambar tepat di x = W.
+    # Gerak robot fisik TIDAK berubah (tetap row_sp per lajur).
+    x_scale = area_w / ((n - 1) * row_sp) if n > 1 else 1.0
+    pts = [(px * x_scale, py) for px, py in pts]
+    polys = [(col, pp * np.array([x_scale, 1.0])) for col, pp in polys]
+    x *= x_scale
+
+    # durasi total
     t_total = 0.0
     for s in segs:
         if s["type"] in ("lane", "gap"):
             t_total += s["len"] / V_FWD + PAUSE_S
         else:
             t_total += T_UTURN[s["side"]] * s["deg"] / 180.0 + PAUSE_S
-    info = {"n_lanes": n, "gap": gap, "end": (x, y, yaw), "t_total": t_total, "polys": polys}
+
+    info = {"n_lanes": n, "gap": gap, "end": (x, y, yaw), "t_total": t_total,
+            "polys": polys, "x_scale": x_scale}
     return segs, np.array(pts), info
 
 
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 # MISI
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+
 class MissionAborted(Exception):
     pass
 
 
 class Mission:
     def __init__(self, link, driver, state, segs, hw, logger, on_done):
-        self.link, self.driver, self.state = link, driver, state
+        self.link = link
+        self.driver = driver
+        self.state = state
         self.segs = list(segs)
         self.hw = hw
         self.logger = logger
@@ -438,22 +520,24 @@ class Mission:
             self.driver.drive(0, 0, sv, 0)
 
     def _move(self, dur, v, omega, sv, steer, cut, label):
-        """Satu gerak dari diam: kirim servo+motor bersamaan (sama seperti
-        tombol dashboard saat kalibrasi), jalan 'dur' detik, lalu berhenti."""
+        """Satu gerak dari diam. Servo + motor dikirim bersamaan."""
         self.phase = label
         self.state.set_cmd(steer, cut)
         if self.hw:
             self.driver.drive(1, 1, sv, cut)
-        el, t_prev = 0.0, time.monotonic()
+        el = 0.0
+        t_prev = time.monotonic()
         try:
             while el < dur:
                 time.sleep(0.02)
                 now = time.monotonic()
-                dt = (now - t_prev) * (1.0 if self.hw else SIM_SPEEDUP)
+                dt = now - t_prev
                 t_prev = now
+                if not self.hw:
+                    dt *= SIM_SPEEDUP
                 dt = min(dt, dur - el)
                 el += dt
-                self.state.integrate(v, omega, dt)
+                self.state.integrate(v, omega, dt)    # pose + encoder
                 self.logger(self, sv, cut)
                 self._check()
         finally:
@@ -501,61 +585,69 @@ class Mission:
             self.on_done(result)
 
 
-# ──────────────────────────────────────────────────────────────
-# GUI (tema terang gaya NISA)
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# GUI
+# ══════════════════════════════════════════════════════════════
+
 class ElitaGUI:
     def __init__(self, link, driver, state):
-        self.link, self.driver, self.state = link, driver, state
+        self.link = link
+        self.driver = driver
+        self.state = state
         self.mission = None
         self.mode = "IDLE"
-        self.ip = DEFAULT_IP
         self.area_w, self.area_h, self.row_sp = AREA_W_DEF, AREA_H_DEF, ROW_SP_DEF
-        self.segs, self.plan_pts, self.info = [], np.zeros((1, 2)), {}
+        self.segs = []
+        self.plan_pts = np.zeros((1, 2))
+        self.info = {}
         self.log_on = False
         self.log_rows = []
         self.log_t0 = 0.0
 
+        # riwayat grafik
         self.h_sv = deque([SERVO_CENTER] * CHART_LEN, maxlen=CHART_LEN)
         self.h_mot = deque([0] * CHART_LEN, maxlen=CHART_LEN)
         self.h_ct = deque([0] * CHART_LEN, maxlen=CHART_LEN)
 
         self.fig = plt.figure(figsize=(14, 8))
-        self.fig.canvas.manager.set_window_title("ELITA - Coverage Path Test v5")
+        self.fig.canvas.manager.set_window_title("ELITA - Coverage Path Test v5.1")
         self.ax = self.fig.add_axes([0.03, 0.05, 0.55, 0.68])
         self.ax.set_aspect("equal")
-
         self.status_txt = self.fig.text(0.03, 0.965, "ROBOT STATUS: IDLE", fontsize=11,
                                         fontweight="bold", va="center")
-
         self._build_controls()
 
+        # terminal
         self.ax_term = self.fig.add_axes([0.61, 0.52, 0.37, 0.44])
         self.ax_term.axis("off")
-        self.term = self.ax_term.text(0, 1, "", va="top", ha="left", fontsize=8.5, color="#7ee787",
-                                      family="monospace", transform=self.ax_term.transAxes)
+        self.term = self.ax_term.text(0, 1, "", va="top", ha="left", fontsize=8.5,
+                                      color="#7ee787", family="monospace",
+                                      transform=self.ax_term.transAxes)
 
+        # grafik servo / motor / cutter
         xs = np.arange(CHART_LEN)
         self.ax_sv = self.fig.add_axes([0.61, 0.37, 0.37, 0.11])
         self.ax_sv.set_title("Servo steering (deg) - telemetri HW / perintah SIM", fontsize=9)
         self.ln_sv, = self.ax_sv.plot(xs, list(self.h_sv), "-", color="#3fb950", lw=1.5)
         self.ax_sv.set_ylim(SERVO_LEFT - 5, SERVO_RIGHT + 5)
+
         self.ax_mot = self.fig.add_axes([0.61, 0.21, 0.37, 0.11])
         self.ax_mot.set_title("Motor (1 = maju, 0 = stop)", fontsize=9)
         self.ln_mot, = self.ax_mot.plot(xs, list(self.h_mot), "-", color="#58a6ff", lw=1.5)
         self.ax_mot.set_ylim(-1.2, 1.2)
+
         self.ax_ct = self.fig.add_axes([0.61, 0.05, 0.37, 0.11])
         self.ax_ct.set_title("Cutter (1 = ON)", fontsize=9)
         self.ln_ct, = self.ax_ct.plot(xs, list(self.h_ct), "-", color="#ff7b72", lw=1.5)
         self.ax_ct.set_ylim(-0.2, 1.3)
+
         for a in (self.ax_sv, self.ax_mot, self.ax_ct):
             a.set_xlim(0, CHART_LEN - 1)
             a.set_xticklabels([])
             a.grid(True, linestyle="--", color=GRID_C)
             a.tick_params(labelsize=7)
 
-        self._replan(initial=True)
-
+        self._replan()
         self.fig.canvas.mpl_connect("close_event", self._on_close)
         self.anim = FuncAnimation(self.fig, self._update, interval=50,
                                   blit=False, cache_frame_data=False)
@@ -602,7 +694,7 @@ class ElitaGUI:
         self.area_w, self.area_h, self.row_sp = w, h, ROW_SP_DEF
         return True
 
-    def _replan(self, initial=False):
+    def _replan(self):
         try:
             segs, pts, info = plan_path(self.area_w, self.area_h, self.row_sp)
         except ValueError as e:
@@ -610,6 +702,7 @@ class ElitaGUI:
             return False
         self.segs, self.plan_pts, self.info = segs, pts, info
         self.state.reset()
+        self.state.set_x_scale(info["x_scale"])
         self._draw_map()
         n_turn = sum(1 for s in segs if s["type"] == "turn")
         push_status(f"[PLAN] {info['n_lanes']} lajur, {n_turn} belokan, "
@@ -655,7 +748,7 @@ class ElitaGUI:
         self._start(hw)
 
     def _cb_stop(self, e):
-        # STOP = berhenti total (motor + cutter mati, reset latch watchdog Uno)
+        # STOP = berhenti total (motor + cutter mati)
         if self.mission:
             self.mission.abort()
         self.driver.halt(bursts=5)
@@ -669,19 +762,17 @@ class ElitaGUI:
         if self._read_config():
             self._replan()
         self.mode = "IDLE"
-        push_status("[GUI] Reset: posisi (0, 0), peta diperbarui")
+        push_status("[GUI] Reset: posisi (0, 0), encoder = 0, peta diperbarui")
 
     def _live_apply(self):
-        """Dipanggil setiap isi W/H berubah: replan diam-diam bila angkanya valid."""
+        """Gambar ulang peta saat W/H diketik (diabaikan selama misi berjalan)."""
         if self._busy() or not hasattr(self, "tb_h"):
             return
         try:
             w, h = float(self.tb_w.text), float(self.tb_h.text)
         except ValueError:
-            return                                  # masih mengetik (mis. "2.")
-        if not (0 < w <= 50 and 0.3 <= h <= 50):
             return
-        if (w, h) == (self.area_w, self.area_h):
+        if not (0 < w <= 50 and 0.3 <= h <= 50) or (w, h) == (self.area_w, self.area_h):
             return
         self.area_w, self.area_h, self.row_sp = w, h, ROW_SP_DEF
         self._replan()
@@ -707,15 +798,27 @@ class ElitaGUI:
         self.link.close()
 
     # ── log ────────────────────────────────────────────────
+    LOG_HEADER = ["t_s", "fase", "x_m", "y_m", "yaw_deg", "servo_cmd",
+                  "servo_uno", "mk_uno", "mr_uno", "cutter_cmd", "cutter_uno",
+                  "enc_l", "enc_r", "wheel_l_m", "wheel_r_m", "rpm_l", "rpm_r",
+                  "distance_m", "x_fisik_m"]
+
     def _log_sample(self, mission, sv_cmd, cut):
         if not self.log_on:
             return
         x, y, yaw, *_ = self.state.snapshot()
+        enc = self.state.encoder_snapshot()
         tel = self.link.get_tel()
-        self.log_rows.append([round(time.monotonic() - self.log_t0, 3), mission.phase,
-                              round(x, 4), round(y, 4), round(math.degrees(yaw), 2),
-                              sv_cmd, tel.get("sv"), tel.get("mk"), tel.get("mr"),
-                              cut, tel.get("ct")])
+        self.log_rows.append([
+            round(time.monotonic() - self.log_t0, 3), mission.phase,
+            round(x, 4), round(y, 4), round(math.degrees(yaw), 2),
+            sv_cmd, tel.get("sv"), tel.get("mk"), tel.get("mr"),
+            cut, tel.get("ct"),
+            enc["enc_l"], enc["enc_r"],
+            round(enc["wheel_l_m"], 5), round(enc["wheel_r_m"], 5),
+            round(enc["rpm_l"], 2), round(enc["rpm_r"], 2),
+            round(enc["distance_m"], 5),
+            round(self.state.x_fisik(), 4)])
 
     def _save_log(self):
         if not self.log_rows:
@@ -725,9 +828,10 @@ class ElitaGUI:
         try:
             with open(fcsv, "w", newline="") as f:
                 w = csv.writer(f)
-                w.writerow(["t_s", "fase", "x_m", "y_m", "yaw_deg", "servo_cmd",
-                            "servo_uno", "mk_uno", "mr_uno", "cutter_cmd", "cutter_uno"])
+                w.writerow(self.LOG_HEADER)
                 w.writerows(self.log_rows)
+
+            # kolom: t, x, y, servo_cmd, cutter_cmd
             d = np.array([[r[0], r[2], r[3], r[5], r[9]] for r in self.log_rows], dtype=float)
             fl, axs = plt.subplots(1, 2, figsize=(13, 5.5))
             fl.suptitle(f"ELITA Log {ts} ({self.mode})", fontweight="bold")
@@ -771,9 +875,13 @@ class ElitaGUI:
             ax.axvline(gx, color=GRID_C, lw=0.6, zorder=0)
         for gy in np.arange(math.floor(min(ys) - m), max(ys) + m + 1, 1.0):
             ax.axhline(gy, color=GRID_C, lw=0.6, zorder=0)
+
+        # area + zona belok
         ax.add_patch(patches.Rectangle((0, 0), W, H, fill=False, ls="--", color="#8b949e", lw=1.2))
         ax.axhspan(H, H + R, color="orange", alpha=0.10, zorder=0)
         ax.axhspan(-R, 0, color="orange", alpha=0.10, zorder=0)
+
+        # jalur rencana + legenda
         for col, pp in self.info["polys"]:
             ax.plot(pp[:, 0], pp[:, 1], "-", color=col, lw=6, alpha=0.22, solid_capstyle="round")
         ax.plot([], [], "-", color=COL_CUT, lw=4, label="Lurus - cutter ON (dipotong)")
@@ -781,26 +889,35 @@ class ElitaGUI:
         ex, ey, _ = self.info["end"]
         ax.plot([0], [0], "^", color="white", ms=10, label="Start")
         ax.plot([ex], [ey], "r*", ms=15, label="Target akhir")
+
+        # jejak aktual
         self.traj_cut, = ax.plot([], [], "-", color=COL_CUT, lw=2.2, alpha=0.95)
         self.traj_turn, = ax.plot([], [], "-", color=COL_TURN, lw=2.2, alpha=0.95)
         ax.plot([], [], "-", color="white", lw=2, label="Garis tipis = jejak robot (odometri)")
+
+        # badan robot
         hw = BODY_W / 2
-        body = np.array([[-hw, -REAR_OVERHANG], [hw, -REAR_OVERHANG],
-                         [hw, BODY_LEN - REAR_OVERHANG], [-hw, BODY_LEN - REAR_OVERHANG]])
-        self.body_local = body
-        self.body = patches.Polygon(body, closed=True, facecolor="#9aa4b2", alpha=0.85, zorder=10)
+        self.body_local = np.array([[-hw, -REAR_OVERHANG], [hw, -REAR_OVERHANG],
+                                    [hw, BODY_LEN - REAR_OVERHANG], [-hw, BODY_LEN - REAR_OVERHANG]])
+        self.body = patches.Polygon(self.body_local, closed=True, facecolor="#9aa4b2",
+                                    alpha=0.85, zorder=10)
         ax.add_patch(self.body)
-        wl = np.array([[-WHEEL_W / 2, -WHEEL_D / 2], [WHEEL_W / 2, -WHEEL_D / 2],
-                       [WHEEL_W / 2, WHEEL_D / 2], [-WHEEL_W / 2, WHEEL_D / 2]])
-        self.wheel_local = wl
+
+        # roda
+        self.wheel_local = np.array([[-WHEEL_W / 2, -WHEEL_D / 2], [WHEEL_W / 2, -WHEEL_D / 2],
+                                     [WHEEL_W / 2, WHEEL_D / 2], [-WHEEL_W / 2, WHEEL_D / 2]])
         ht = TRACK / 2
         self.wheel_centers = [(-ht, 0.0), (ht, 0.0), (-ht, WHEELBASE), (ht, WHEELBASE)]
-        self.wheels = [patches.Polygon(wl.copy(), closed=True, facecolor="#e6edf3", zorder=11)
+        self.wheels = [patches.Polygon(self.wheel_local.copy(), closed=True,
+                                       facecolor="#e6edf3", zorder=11)
                        for _ in self.wheel_centers]
         for p in self.wheels:
             ax.add_patch(p)
+
+        # indikator cutter
         self.cut_dot = patches.Circle((0, 0), 0.06, color="red", alpha=0.0, zorder=12)
         ax.add_patch(self.cut_dot)
+
         ax.set_title(f"Coverage Path - {self.info['n_lanes']} lajur, RS {self.row_sp:.2f} m, "
                      f"area {W:.1f} x {H:.1f} m  (zona oranye = ruang belok di luar area)",
                      fontsize=9)
@@ -811,12 +928,13 @@ class ElitaGUI:
     def _update(self, frame):
         x, y, yaw, steer, cut, traj = self.state.snapshot()
         tel = self.link.get_tel()
+        enc = self.state.encoder_snapshot()
         hw_mode = self.mode == "HW" or (self.mission and self.mission.hw and self._busy())
 
-        # robot (Rotasi: yaw 0 = +Y, positif searah jarum jam)
+        # robot
         rot = -yaw
-        t = transforms.Affine2D().rotate(rot).translate(x, y) + self.ax.transData
-        self.body.set_transform(t)
+        self.body.set_transform(transforms.Affine2D().rotate(rot).translate(x, y)
+                                + self.ax.transData)
         c, s = math.cos(rot), math.sin(rot)
         steer_rad = -math.radians(STEER_DRAW_DEG) * steer
         for i, (cx, cy) in enumerate(self.wheel_centers):
@@ -827,15 +945,19 @@ class ElitaGUI:
             self.wheels[i].set_xy(self.wheel_local @ M.T + np.array([wx, wy]))
         self.cut_dot.center = (x + math.sin(yaw) * 0.12, y + math.cos(yaw) * 0.12)
         self.cut_dot.set_alpha(0.8 if cut else 0.0)
+
+        # jejak (merah = cutter ON, biru = belok)
         if traj:
             cx, cy, tx2, ty2 = [], [], [], []
             for k in range(1, len(traj)):
                 x0, y0, _ = traj[k - 1]
                 x1, y1, c1 = traj[k]
                 if c1:
-                    cx += [x0, x1, np.nan]; cy += [y0, y1, np.nan]
+                    cx += [x0, x1, np.nan]
+                    cy += [y0, y1, np.nan]
                 else:
-                    tx2 += [x0, x1, np.nan]; ty2 += [y0, y1, np.nan]
+                    tx2 += [x0, x1, np.nan]
+                    ty2 += [y0, y1, np.nan]
             self.traj_cut.set_data(cx, cy)
             self.traj_turn.set_data(tx2, ty2)
 
@@ -860,8 +982,8 @@ class ElitaGUI:
         m = self.mission
         phase = m.phase if m else "IDLE"
         if self.mode == "HW":
-            txt, col = f"ROBOT STATUS: ROBOT {'ONLINE' if online else 'OFFLINE'} | {phase}", \
-                       ("#3fb950" if online else "#ff7b72")
+            txt = f"ROBOT STATUS: ROBOT {'ONLINE' if online else 'OFFLINE'} | {phase}"
+            col = "#3fb950" if online else "#ff7b72"
         elif self.mode == "SIM":
             txt, col = f"ROBOT STATUS: SIMULASI ({SIM_SPEEDUP:.0f}x lebih cepat) | {phase}", "#58a6ff"
         elif self.mode == "SELESAI":
@@ -869,24 +991,40 @@ class ElitaGUI:
         elif self.mode == "STOP":
             txt, col = "ROBOT STATUS: STOP", "#ff7b72"
         else:
-            txt, col = f"ROBOT STATUS: IDLE | WS {'OK' if self.link.connected else '--'} | " \
-                       f"UNO {'OK' if online else 'OFF'}  (START = {'ROBOT' if online else 'SIMULASI'})", "white"
+            txt = (f"ROBOT STATUS: IDLE | WS {'OK' if self.link.connected else '--'} | "
+                   f"UNO {'OK' if online else 'OFF'}  (START = {'ROBOT' if online else 'SIMULASI'})")
+            col = "white"
         self.status_txt.set_text(txt)
         self.status_txt.set_color(col)
 
+        # terminal
         ex, ey, eyaw = self.info.get("end", (0, 0, 0))
         seg_i = m.seg_idx if m else 0
         lines = [
             f"MODE: {self.mode}   FASE: {phase}",
             f"Segmen: {min(seg_i + 1, len(self.segs))}/{len(self.segs)}   "
             f"Durasi rencana: {self.info.get('t_total', 0):.1f} s",
-            "-" * 44,
-            f"[POSE ODOMETRI] x={x:.2f} y={y:.2f} m  yaw={math.degrees(yaw) % 360:.0f} deg",
-            f"[TARGET AKHIR]  x={ex:.2f} y={ey:.2f} m  yaw={math.degrees(eyaw) % 360:.0f} deg",
+            "-" * 48,
+            f"[POSE ODOMETRI] x={x:.2f} y={y:.2f} m yaw={math.degrees(yaw) % 360:.0f} deg",
+            f"                x fisik={self.state.x_fisik():.2f} m "
+            f"(skala X {self.info.get('x_scale', 1.0):.3f})",
+            f"[TARGET AKHIR]  x={ex:.2f} y={ey:.2f} m yaw={math.degrees(eyaw) % 360:.0f} deg",
+            "-" * 48,
+            "[ENCODER SIMULASI]",
+            f"  L = {enc['enc_l']:>8d} count",
+            f"  R = {enc['enc_r']:>8d} count",
+            "[WHEEL DIST]",
+            f"  L = {enc['wheel_l_m']:.4f} m",
+            f"  R = {enc['wheel_r_m']:.4f} m",
+            "[RPM]",
+            f"  L = {enc['rpm_l']:.1f}",
+            f"  R = {enc['rpm_r']:.1f}",
+            f"[DISTANCE] {enc['distance_m']:.4f} m",
+            "-" * 48,
             f"[UNO] servo={tel.get('sv')} mk={tel.get('mk')} mr={tel.get('mr')} "
             f"ct={tel.get('ct')} wd={tel.get('wd')} bf={tel.get('bf')}",
-            "-" * 44,
-        ] + status_snapshot(10)
+            "-" * 48,
+        ] + status_snapshot(7)
         self.term.set_text("\n".join(lines))
         return ()
 
@@ -894,11 +1032,14 @@ class ElitaGUI:
         plt.show()
 
 
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
 # MAIN
-# ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+
 def main():
-    push_status("ELITA Coverage Path Test v5")
+    push_status("ELITA Coverage Path Test v5.1")
+    push_status(f"[ENC] PPR={ENCODER_PPR}, quadrature=x{ENCODER_QUAD}, CPR={ENCODER_CPR}")
+    push_status(f"[ENC] Wheel diameter={WHEEL_D:.3f} m, {ENC_M_PER_COUNT:.8f} m/count")
     link = RobotLink(ws_url(DEFAULT_IP))
     driver = Driver(link)
     state = RobotState()
